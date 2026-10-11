@@ -1,160 +1,258 @@
-# Loading useful libraries/packages
+"""Nonlinear-programming benchmark used in the 2023 SITRAER paper.
+
+The optimization model matches the paper's fixed-runway-configuration benchmark:
+for each time slot and sampled weather condition, integer arrival/departure
+service rates minimize the same quadratic delay/cost used by the RL agent,
+subject to the corresponding runway-capacity envelope and queue bounds.
+
+Compared with the original script, the AMPL model is built once and reused for
+all time slots. This preserves the optimization problem while removing a large
+amount of avoidable interpreter/model-construction overhead.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from amplpy import AMPL,Environment
 
-# Plotting the VMC capacity envelope
-print('Plotting the VMC  and the IMC capacity envelopes...')
-x_vmc = [0,17,24,28,28] # Intersecting points in x
-y_vmc = [30,30,24,15,0] # Intersecting points in y
-plt.plot(x_vmc,y_vmc)
+X_VMC = [0, 17, 24, 28, 28]
+Y_VMC = [30, 30, 24, 15, 0]
+X_IMC = [0, 12, 17, 20, 20]
+Y_IMC = [22, 22, 17, 11, 0]
 
-# Plotting the IMC capacity envelope
-x_imc = [0,12,17,20,20] # Intersecting points in x
-y_imc = [22,22,17,11,0] # Intersecting points in y
-plt.plot(x_imc,y_imc)
-plt.legend(['VMC','IMC'])
-plt.xlabel('Arrivals')
-plt.ylabel('Departures')
-plt.show()
-print('Done.\n')
+PAPER_EPISODES = 1_000
+PAPER_ARRIVAL_PRIORITY = 2.0
 
-# Loading data
-print('Loading data...')
-demand_data = pd.read_excel("demand.xlsx", index_col = 0) # Demand information
-print('Done.')
 
-# Total number of time slots
-N = len(demand_data)
+def load_demand(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    data = pd.read_excel(path, index_col=0)
+    required = ["Arrival Demand", "Departure Demand", "IMC Probability"]
+    missing = [column for column in required if column not in data.columns]
+    if missing:
+        raise ValueError(f"missing required columns: {', '.join(missing)}")
 
-# Arrival priority
-alpha = 2
+    arrivals = data["Arrival Demand"].to_numpy(dtype=int)
+    departures = data["Departure Demand"].to_numpy(dtype=int)
+    imc_probability = data["IMC Probability"].to_numpy(dtype=float)
 
-# Initial queue
-a_0 = 0 # Initial arrival queue
-d_0 = 0 # Initial departure queue
+    if np.any(arrivals < 0) or np.any(departures < 0):
+        raise ValueError("arrival and departure demands must be nonnegative")
+    if np.any((imc_probability < 0) | (imc_probability > 1)):
+        raise ValueError("IMC probabilities must be in [0, 1]")
+    return arrivals, departures, imc_probability
 
-# Optimal values list
-opt_values = []
 
-# Optimization for different scenarios
-episodes = 1000
+def capacity_constraints(
+    x: Sequence[float], y: Sequence[float]
+) -> Tuple[List[float], List[float], List[float]]:
+    """Return p, q, r for envelope inequalities p*v + q*u <= r."""
+    if len(x) != len(y) or len(x) < 4:
+        raise ValueError("invalid capacity envelope")
 
-for eps in range(episodes):
-    
-    a_t = a_0
-    d_t = d_0
-    z = 0
-    arr = {}
-    dep = {}
-    plt.plot(x_vmc,y_vmc)
-    plt.plot(x_imc,y_imc)
-    plt.legend(['VMC','IMC'])
-    plt.xlabel('Arrivals')
-    plt.ylabel('Departures')
-    
-    for t in range(N):
-        
-        # Updating the demand queue
-        a_t += demand_data['Arrival Demand'][t]
-        d_t += demand_data['Departure Demand'][t]
-        
-        # Probability of IMC
-        IMC_prob = demand_data['IMC Probability'][t]
-    
-        # Determining the current state
-        wc = np.random.choice(['IMC','VMC'],p = [IMC_prob,1 - IMC_prob])
-        
-        # Determining the constraints
-        p = []
-        q = []
-        r = []
-        if wc == 'VMC':
-            p.append(1)
-            q.append(0)
-            r.append(np.max(y_vmc))
-            for i in range(1,len(x_vmc)-2):
-                dy = y_vmc[i+1] - y_vmc[i]
-                dx = x_vmc[i+1] - x_vmc[i]
-                p.append(1)
-                q.append(-dy/dx)
-                r.append(y_vmc[i] - dy/dx*x_vmc[i])
-            p.append(0)
-            q.append(1)
-            r.append(np.max(x_vmc))
-        elif wc == 'IMC':
-            p.append(1)
-            q.append(0)
-            r.append(np.max(y_imc))
-            for i in range(1,len(x_imc)-2):
-                dy = y_imc[i+1] - y_imc[i]
-                dx = x_imc[i+1] - x_imc[i]
-                p.append(1)
-                q.append(-dy/dx)
-                r.append(y_imc[i] - dy/dx*x_imc[i])
-            p.append(0)
-            q.append(1)
-            r.append(np.max(x_imc))
-        
-        # Solving with AMPL
-        ampl = AMPL(Environment(r'C:\Users\lucas\Desktop\ampl.mswin64'))
-        ampl.eval(r"""
-            param a_t;
-            param d_t;
-            param alpha;
-            param p{i in 1..4};
-            param q{i in 1..4};
-            param r{i in 1..4};
-            var u integer >= 0;
-            var v integer >= 0;
-            minimize delay:
-                alpha*(a_t - u)^2 + (d_t - v)^2;
-            s.t. c1:
-                p[1]*v + q[1]*u <= r[1];
-            s.t. c2:
-                p[2]*v + q[2]*u <= r[2];
-            s.t. c3:
-                p[3]*v + q[3]*u <= r[3];
-            s.t. c4:
-                p[4]*v + q[4]*u <= r[4];
-            s.t. c5:
-                u <= a_t;
-            s.t. c6:
-                v <= d_t;
-        """)
-        ampl.param['alpha'] = alpha
-        ampl.param['a_t'] = int(a_t)
-        ampl.param['d_t'] = int(d_t)
-        ampl.param['p'] = p
-        ampl.param['q'] = q
-        ampl.param['r'] = r
-        ampl.option['solver'] = 'knitro'
-        ampl.option['knitro_options'] = 'ms_enable=1 ms_num_to_save=5 ms_savetol=0.01 ms_maxsolves=10'
-        ampl.solve()
-        #assert ampl.get_value('solve_result') == 'solved'
-        sol = ampl.get_value('alpha*(a_t - u)^2 + (d_t - v)^2')
-        arr[t] = round(ampl.get_value('u'))
-        dep[t] = round(ampl.get_value('v'))
-        print('Optimal solution for episode '+str(eps+1)+', step '+str(t+1)+': '+str(round(sol,2))+', x = ['+str(arr[t])+', '+str(dep[t])+']')
-        plt.plot(arr[t],dep[t],'o',color='grey')
-        
-        # Updating the queues
-        a_t -= arr[t]
-        d_t -= dep[t]
-        
-        # Calculating the total solution
-        z += sol
-    
-    opt_values.append(round(z,2))
-    print('Optimal value for episode '+str(eps+1)+': '+str(round(z,2)))
-    plt.show()
+    p = [1.0]
+    q = [0.0]
+    r = [float(max(y))]
 
-# Plotting the results
-plt.plot([i+1 for i in range(episodes)],opt_values,'o')
-plt.plot([i+1 for i in range(episodes)],[round(np.average(opt_values),2) for i in range(episodes)],'--')
-plt.xlabel('Episodes')
-plt.ylabel('Delay/Cost')
-plt.show()
-print('Optimal value (average): '+str(round(np.average(opt_values),2)))
-        
+    for i in range(1, len(x) - 2):
+        dx = x[i + 1] - x[i]
+        if dx == 0:
+            raise ValueError("unexpected vertical segment inside the envelope")
+        slope = (y[i + 1] - y[i]) / dx
+        p.append(1.0)
+        q.append(float(-slope))
+        r.append(float(y[i] - slope * x[i]))
+
+    p.append(0.0)
+    q.append(1.0)
+    r.append(float(max(x)))
+    return p, q, r
+
+
+def build_ampl(ampl_path: Optional[Path], solver: str, solver_options: str):
+    """Create and initialize the reusable AMPL optimization model."""
+    try:
+        from amplpy import AMPL, Environment
+    except ImportError as exc:
+        raise RuntimeError(
+            "amplpy is required for this benchmark. Install requirements-ampl.txt "
+            "and ensure AMPL plus the selected solver are available."
+        ) from exc
+
+    ampl = AMPL(Environment(str(ampl_path))) if ampl_path else AMPL()
+    ampl.eval(
+        r"""
+        param a_t >= 0;
+        param d_t >= 0;
+        param alpha > 0;
+        param p{i in 1..4};
+        param q{i in 1..4};
+        param r{i in 1..4};
+
+        var u integer >= 0;
+        var v integer >= 0;
+
+        minimize delay:
+            alpha*(a_t - u)^2 + (d_t - v)^2;
+
+        s.t. capacity{i in 1..4}:
+            p[i]*v + q[i]*u <= r[i];
+        s.t. arrivals_available:
+            u <= a_t;
+        s.t. departures_available:
+            v <= d_t;
+        """
+    )
+    ampl.option["solver"] = solver
+    if solver_options:
+        ampl.option[f"{solver}_options"] = solver_options
+    return ampl
+
+
+def solve_benchmark(
+    arrival_demand: np.ndarray,
+    departure_demand: np.ndarray,
+    imc_probability: np.ndarray,
+    *,
+    episodes: int = PAPER_EPISODES,
+    arrival_priority: float = PAPER_ARRIVAL_PRIORITY,
+    initial_arrival_queue: int = 0,
+    initial_departure_queue: int = 0,
+    ampl_path: Optional[Path] = None,
+    solver: str = "knitro",
+    solver_options: str = "ms_enable=1 ms_num_to_save=5 ms_savetol=0.01 ms_maxsolves=10",
+    report_every: int = 10,
+    seed: Optional[int] = None,
+) -> np.ndarray:
+    if episodes <= 0:
+        raise ValueError("episodes must be positive")
+    if report_every <= 0:
+        raise ValueError("report_every must be positive")
+    if not (
+        len(arrival_demand) == len(departure_demand) == len(imc_probability)
+    ):
+        raise ValueError("demand and probability arrays must have equal length")
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    constraints: Dict[int, Tuple[List[float], List[float], List[float]]] = {
+        0: capacity_constraints(X_VMC, Y_VMC),
+        1: capacity_constraints(X_IMC, Y_IMC),
+    }
+
+    ampl = build_ampl(ampl_path, solver, solver_options)
+    ampl.param["alpha"] = float(arrival_priority)
+
+    horizon = len(arrival_demand)
+    episode_costs = np.empty(episodes, dtype=float)
+
+    for episode in range(episodes):
+        arrivals_queue = int(initial_arrival_queue)
+        departures_queue = int(initial_departure_queue)
+        total_cost = 0.0
+
+        for t in range(horizon):
+            arrivals_queue += int(arrival_demand[t])
+            departures_queue += int(departure_demand[t])
+            weather_condition = int(np.random.random() < imc_probability[t])
+            p, q, r = constraints[weather_condition]
+
+            ampl.param["a_t"] = arrivals_queue
+            ampl.param["d_t"] = departures_queue
+            ampl.param["p"] = p
+            ampl.param["q"] = q
+            ampl.param["r"] = r
+            ampl.solve()
+
+            solve_result = str(ampl.get_value("solve_result"))
+            if solve_result != "solved":
+                raise RuntimeError(
+                    f"AMPL failed at episode {episode + 1}, slot {t + 1}: {solve_result}"
+                )
+
+            slot_cost = float(
+                ampl.get_value("alpha*(a_t - u)^2 + (d_t - v)^2")
+            )
+            arrivals_served = int(round(ampl.get_value("u")))
+            departures_served = int(round(ampl.get_value("v")))
+
+            arrivals_queue -= arrivals_served
+            departures_queue -= departures_served
+            total_cost += slot_cost
+
+        episode_costs[episode] = total_cost
+
+        if episode == 0 or (episode + 1) % report_every == 0 or episode + 1 == episodes:
+            print(
+                f"Episode {episode + 1:,}/{episodes:,}: "
+                f"cost={total_cost:.2f}, mean={episode_costs[: episode + 1].mean():.2f}"
+            )
+
+    return episode_costs
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the AMPL/Knitro benchmark from the 2023 SITRAER paper."
+    )
+    parser.add_argument("--data", type=Path, default=Path("demand.xlsx"))
+    parser.add_argument("--episodes", type=int, default=PAPER_EPISODES)
+    parser.add_argument("--arrival-priority", type=float, default=PAPER_ARRIVAL_PRIORITY)
+    parser.add_argument("--initial-arrival-queue", type=int, default=0)
+    parser.add_argument("--initial-departure-queue", type=int, default=0)
+    parser.add_argument(
+        "--ampl-path",
+        type=Path,
+        default=None,
+        help="optional AMPL installation directory; omit if AMPL is on PATH",
+    )
+    parser.add_argument("--solver", default="knitro")
+    parser.add_argument(
+        "--solver-options",
+        default="ms_enable=1 ms_num_to_save=5 ms_savetol=0.01 ms_maxsolves=10",
+    )
+    parser.add_argument("--report-every", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--show-plot", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    arrival_demand, departure_demand, imc_probability = load_demand(args.data)
+    costs = solve_benchmark(
+        arrival_demand,
+        departure_demand,
+        imc_probability,
+        episodes=args.episodes,
+        arrival_priority=args.arrival_priority,
+        initial_arrival_queue=args.initial_arrival_queue,
+        initial_departure_queue=args.initial_departure_queue,
+        ampl_path=args.ampl_path,
+        solver=args.solver,
+        solver_options=args.solver_options,
+        report_every=args.report_every,
+        seed=args.seed,
+    )
+
+    print(f"Average cost over {len(costs):,} episodes: {costs.mean():.2f}")
+
+    if args.show_plot:
+        x = np.arange(1, len(costs) + 1)
+        plt.figure()
+        plt.plot(x, costs, "o", markersize=3, label="Episode cost")
+        plt.axhline(costs.mean(), linestyle="--", label="Mean cost")
+        plt.xlabel("Episodes")
+        plt.ylabel("Delay/Cost")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
