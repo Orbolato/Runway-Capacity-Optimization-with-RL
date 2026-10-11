@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated 2023 SITRAER paper."
+title: "Runway Capacity Optimization with Reinforcement Learning"
+type: software
+authors:
+  - family-names: Carvalho
+    given-names: Lucas Orbolato
+    orcid: "https://orcid.org/0000-0002-8402-5832"
+  - family-names: Murça
+    given-names: Mayara Condé Rocha
+  - family-names: Guterres
+    given-names: Marcelo Xavier
+repository-code: "https://github.com/Orbolato/Runway-Capacity-Optimization-with-RL"
+preferred-citation:
+  type: conference-paper
+  title: "A Reinforcement Learning Approach for Optimizing the Runway Capacity Utilization Under Uncertainty"
+  authors:
+    - family-names: Carvalho
+      given-names: Lucas Orbolato
+    - family-names: Murça
+      given-names: Mayara Condé Rocha
+    - family-names: Guterres
+      given-names: Marcelo Xavier
+  collection-title: "XX SITRAER - Air Transportation Symposium"
+  year: 2023
+  url: "https://conferencias.ufsc.br/index.php/sitraer/xx/paper/view/2181"
